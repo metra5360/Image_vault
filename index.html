@@ -257,25 +257,6 @@
 
     input[type="file"] { display: none; }
 
-    .sync {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 0.82rem;
-    }
-
-    .sync-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #6b7280;
-    }
-
-    .sync.online .sync-dot { background: var(--accent-2); box-shadow: 0 0 10px var(--accent-2); }
-    .sync.error .sync-dot { background: var(--danger); }
-
     @media (max-width: 640px) {
       .card-actions { opacity: 1; }
     }
@@ -288,8 +269,7 @@
         <div class="logo" aria-hidden="true"></div>
         <div>
           <h1>Image Vault</h1>
-          <p class="subtitle">Скріншоти й підписи синхронізуються між користувачами через Firebase</p>
-          <p class="sync" id="syncStatus"><span class="sync-dot"></span><span id="syncText">Підключення…</span></p>
+          <p class="subtitle">Зберігайте скріншоти та фото з підписами — усе лишається в браузері</p>
         </div>
       </div>
       <div class="toolbar">
@@ -319,52 +299,7 @@
     </div>
   </dialog>
 
-  <!--
-    Firebase Console:
-    1) Authentication → Sign-in method → Anonymous
-    2) Firestore Database → Start
-    3) Storage → Start
-    4) Rules (Firestore):
-       match /images/{id} { allow read, write: if request.auth != null; }
-    5) Rules (Storage):
-       match /images/{allPaths=**} { allow read, write: if request.auth != null; }
-  -->
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
-    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
-    import {
-      getFirestore,
-      collection,
-      doc,
-      setDoc,
-      updateDoc,
-      deleteDoc,
-      onSnapshot
-    } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
-    import {
-      getStorage,
-      ref as storageRef,
-      uploadBytes,
-      getDownloadURL,
-      deleteObject
-    } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-storage.js";
-
-    const firebaseConfig = {
-      apiKey: "AIzaSyDle4fN9qCoExD2ABCXAOiM1Xhsd9zsGpk",
-      authDomain: "projectconfig-72c75.firebaseapp.com",
-      projectId: "projectconfig-72c75",
-      storageBucket: "projectconfig-72c75.firebasestorage.app",
-      messagingSenderId: "535779482495",
-      appId: "1:535779482495:web:06d81a5c7bca10c640184a"
-    };
-
-    const firebaseReady = !Object.values(firebaseConfig).some((value) => String(value).includes("YOUR_"));
-    let firebaseApp = null;
-    let firebaseAuth = null;
-    let firebaseDb = null;
-    let firebaseStorage = null;
-    let imagesCol = null;
-
+  <script>
     const DB_NAME = "image-vault";
     const STORE = "items";
 
@@ -375,16 +310,8 @@
     const lightbox = document.getElementById("lightbox");
     const lightboxImg = document.getElementById("lightboxImg");
     const lightboxCaption = document.getElementById("lightboxCaption");
-    const syncStatus = document.getElementById("syncStatus");
-    const syncText = document.getElementById("syncText");
 
     let items = [];
-
-    function setSync(state, text) {
-      syncStatus.classList.remove("online", "error");
-      if (state) syncStatus.classList.add(state);
-      syncText.textContent = text;
-    }
 
     function openDb() {
       return new Promise((resolve, reject) => {
@@ -408,7 +335,7 @@
       render();
     }
 
-    async function saveLocal(item) {
+    async function saveItem(item) {
       const db = await openDb();
       await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE, "readwrite");
@@ -418,20 +345,7 @@
       });
     }
 
-    async function saveItem(item) {
-      await saveLocal(item);
-      if (!imagesCol) return;
-      await setDoc(doc(imagesCol, item.id), {
-        caption: item.caption,
-        createdAt: item.createdAt,
-        type: item.type,
-        downloadURL: item.downloadURL || "",
-        storagePath: item.storagePath || `images/${item.id}`
-      });
-    }
-
     async function deleteItem(id) {
-      const item = items.find((entry) => entry.id === id);
       const db = await openDb();
       await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE, "readwrite");
@@ -439,22 +353,21 @@
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
       });
-      if (firebaseStorage && item?.storagePath) {
-        try { await deleteObject(storageRef(firebaseStorage, item.storagePath)); } catch {}
-      }
-      if (imagesCol) {
-        await deleteDoc(doc(imagesCol, id));
-      }
-      items = items.filter((entry) => entry.id !== id);
+      items = items.filter((item) => item.id !== id);
       render();
     }
 
     async function clearAll() {
       if (!confirm("Видалити всі зображення?")) return;
-      const snapshot = [...items];
-      for (const item of snapshot) {
-        await deleteItem(item.id);
-      }
+      const db = await openDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).clear();
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      items = [];
+      render();
     }
 
     function blobToDataUrl(blob) {
@@ -470,24 +383,13 @@
       const list = [...files].filter((file) => file.type.startsWith("image/"));
       for (const file of list) {
         const dataUrl = await blobToDataUrl(file);
-        const id = crypto.randomUUID();
-        const storagePath = `images/${id}`;
         const item = {
-          id,
+          id: crypto.randomUUID(),
           caption: file.name.replace(/\.[^.]+$/, ""),
           createdAt: Date.now(),
-          type: file.type || "image/png",
-          dataUrl,
-          storagePath,
-          downloadURL: ""
+          type: file.type,
+          dataUrl
         };
-
-        if (firebaseStorage) {
-          const fileRef = storageRef(firebaseStorage, storagePath);
-          await uploadBytes(fileRef, file, { contentType: item.type });
-          item.downloadURL = await getDownloadURL(fileRef);
-        }
-
         items.unshift(item);
         await saveItem(item);
       }
@@ -533,11 +435,10 @@
           </div>
         `;
         const img = card.querySelector("img");
-        const src = item.downloadURL || item.dataUrl;
-        img.src = src;
+        img.src = item.dataUrl;
         img.alt = item.caption || "Зображення";
         img.addEventListener("click", () => {
-          lightboxImg.src = src;
+          lightboxImg.src = item.dataUrl;
           lightboxImg.alt = item.caption;
           lightboxCaption.textContent = item.caption || "Без підпису";
           lightbox.showModal();
@@ -548,10 +449,7 @@
         textarea.placeholder = "Підпис під зображенням…";
         textarea.addEventListener("change", async () => {
           item.caption = textarea.value.trim();
-          await saveLocal(item);
-          if (imagesCol) {
-            await updateDoc(doc(imagesCol, item.id), { caption: item.caption });
-          }
+          await saveItem(item);
           img.alt = item.caption || "Зображення";
         });
 
@@ -565,7 +463,7 @@
         card.querySelector('[data-act="download"]').addEventListener("click", (e) => {
           e.stopPropagation();
           const a = document.createElement("a");
-          a.href = item.downloadURL || item.dataUrl;
+          a.href = item.dataUrl;
           a.download = (item.caption || "image").replace(/[\\/:*?"<>|]/g, "_") + ".png";
           a.click();
         });
@@ -625,40 +523,7 @@
       if (e.target === lightbox) lightbox.close();
     });
 
-    async function initFirebase() {
-      if (!firebaseReady) {
-        setSync("", "Локально. Вставте ключі firebaseConfig, щоб синхронізувати з іншими.");
-        return;
-      }
-
-      try {
-        firebaseApp = initializeApp(firebaseConfig);
-        firebaseAuth = getAuth(firebaseApp);
-        firebaseDb = getFirestore(firebaseApp);
-        firebaseStorage = getStorage(firebaseApp);
-        imagesCol = collection(firebaseDb, "images");
-
-        await signInAnonymously(firebaseAuth);
-        setSync("online", "Firebase: онлайн, спільна галерея");
-
-        onSnapshot(imagesCol, (snap) => {
-          items = snap.docs
-            .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
-            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-          items.forEach((item) => saveLocal(item));
-          render();
-        }, (error) => {
-          setSync("error", "Firebase: помилка слухача — " + error.message);
-        });
-      } catch (error) {
-        imagesCol = null;
-        firebaseStorage = null;
-        setSync("error", "Firebase недоступний, працює локальна копія. " + error.message);
-      }
-    }
-
-    await loadItems();
-    await initFirebase();
+    loadItems();
   </script>
 </body>
 </html>
